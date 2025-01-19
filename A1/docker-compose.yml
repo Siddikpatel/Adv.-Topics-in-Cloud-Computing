@@ -1,0 +1,16 @@
+services:
+  container1:
+    image: patelsid/a01container1
+    ports:
+      - "6000:6000"
+    volumes:
+      - .:/usr/src/app/local
+    depends_on:
+      - container2
+
+  container2:
+    image: patelsid/a01container2
+    volumes:
+      - .:/usr/src/app/local
+    ports:
+      - "3000:3000"
