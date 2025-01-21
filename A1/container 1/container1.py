@@ -3,7 +3,6 @@ import os
 import requests
 
 app = Flask(__name__)
-app.json.sort_keys = False
 base_path = './local/'
 
 @app.route('/calculate', methods=['POST'])
@@ -12,7 +11,7 @@ def validate():
     data = request.get_json()
 
     if 'file' not in data or not data['file'] or 'product' not in data or not data['product']:
-        return jsonify({'file': 'null', 'error': 'Invalid JSON input.'}), 400
+        return jsonify({'file': None, 'error': 'Invalid JSON input.'}), 400
 
     file_name = data['file']
 

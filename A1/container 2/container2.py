@@ -1,9 +1,7 @@
 from flask import Flask, request, jsonify
 import csv
-import os
 
 app = Flask(__name__)
-app.json.sort_keys = False
 base_path = './local/'
 
 @app.route('/', methods=['POST'])
@@ -20,6 +18,9 @@ def calculate_sum():
         with open(base_path + file_name, 'r') as csvfile:
 
             reader = csv.DictReader(csvfile)
+
+            if len(reader.fieldnames) < 2 or 'product' not in reader.fieldnames or 'amount' not in reader.fieldnames:
+                raise Exception
 
             for row in reader:
                 if row['product'] == product:
