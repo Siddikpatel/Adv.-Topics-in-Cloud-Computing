@@ -9,9 +9,6 @@ services:
   container2:
     image: patelsid/a01container2
     ports:
-      - "0:3001"
+      - "5100:5100"
     volumes:
       - .:/usr/src/app/local
-    environment:
-      - PORT=3001
-    
