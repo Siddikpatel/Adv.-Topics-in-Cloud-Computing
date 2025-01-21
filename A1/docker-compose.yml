@@ -8,7 +8,10 @@ services:
 
   container2:
     image: patelsid/a01container2
+    ports:
+      - "0:3001"
     volumes:
       - .:/usr/src/app/local
-    ports:
-      - "3001:3001"
+    environment:
+      - PORT=3001
+    
