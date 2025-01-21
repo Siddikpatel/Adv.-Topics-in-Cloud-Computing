@@ -5,8 +5,6 @@ services:
       - "6000:6000"
     volumes:
       - .:/usr/src/app/local
-    depends_on:
-      - container2
 
   container2:
     image: patelsid/a01container2
