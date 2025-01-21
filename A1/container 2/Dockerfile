@@ -6,6 +6,6 @@ COPY container2.py /usr/src/app/container2.py
 
 RUN pip install flask
 
-EXPOSE 3000
+EXPOSE 7000
 
 CMD [ "python", "container2.py" ]

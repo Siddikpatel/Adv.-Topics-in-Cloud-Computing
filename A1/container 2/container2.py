@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 import csv
-import os
 
 app = Flask(__name__)
 app.json.sort_keys = False
@@ -31,4 +30,4 @@ def calculate_sum():
         return jsonify({"file": file_name, "error": "Input file not in CSV format."}), 500
     
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3000)
+    app.run(host='0.0.0.0', port=3001)
