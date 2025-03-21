@@ -8,4 +8,4 @@ RUN pip install flask requests
 
 EXPOSE 6000
 
-CMD [ "python", "container1.py" ]
+CMD [ "python", "container1.py" ]   
