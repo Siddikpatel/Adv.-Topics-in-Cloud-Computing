@@ -1,0 +1,28 @@
+options:
+  logging: "CLOUD_LOGGING_ONLY"
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-image-id
+    args:
+      - "build"
+      - "--no-cache"
+      - "-t"
+      - "us-central1-docker.pkg.dev/western-notch-453423-p9/csci5409/container1:latest"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: push-image-id
+    args:
+      - "push"
+      - "us-central1-docker.pkg.dev/western-notch-453423-p9/csci5409/container1:latest"
+
+  - name: "gcr.io/cloud-builders/kubectl"
+    id: rollout-image-id
+    env:
+      - "CLOUDSDK_CONTAINER_CLUSTER=assignment-cluster"
+      - "CLOUDSDK_COMPUTE_ZONE=us-central1"
+    args:
+      - "rollout"
+      - "restart"
+      - "deployment/application-deployment"
