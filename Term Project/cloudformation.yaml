@@ -1,0 +1,725 @@
+Parameters:
+
+  UploadS3BucketName:
+    Type: String
+    Default: text-to-speech-upload-bucket-5409
+    Description: "Enter the name of the S3 bucket where the uploaded files will be stored."
+
+  OutputS3BucketName:
+    Type: String
+    Default: text-to-speech-output-bucket-5409
+    Description: "Enter the name of the S3 bucket where the output files will be stored."
+
+  FrontendSourceCodeBucket:
+    Type: String
+    Default: text-to-speech-source-code-bucket
+    Description: "Enter the name of the S3 bucket where the frontend source code is stored."
+
+  FrontendSourceCode:
+    Type: String
+    Default: myapp.zip
+    Description: "Enter the name of the frontend source code .zip file."
+
+  SenderEmail:
+    Type: String
+    Default: "patel.siddik369@gmail.com"
+
+Resources:
+
+  GatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: GatewayRestApi
+      Description: "Generates presigned URL for S3 bucket that stores input files."
+      EndpointConfiguration:
+        Types:
+        - REGIONAL
+
+  Upload:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref GatewayRestApi
+      ParentId: !GetAtt 
+      - GatewayRestApi
+      - RootResourceId
+      PathPart: "upload"
+
+  UploadPostURL:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref GatewayRestApi
+      ResourceId: !Ref Upload
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetPresignedUrlForS3Function.Arn}/invocations
+
+  Options:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref GatewayRestApi
+      ResourceId: !Ref Upload
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+      - UploadPostURL
+      - Options
+    Properties:
+      RestApiId: !Ref GatewayRestApi
+      Description: "API Gateway deployed in production"
+
+  Prod:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: prod
+      Description: "Production Stage"
+      RestApiId: !Ref GatewayRestApi
+      DeploymentId: !Ref ApiDeployment
+  
+  ApiGatewayInvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GetPresignedUrlForS3Function
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${GatewayRestApi}/*/POST/upload"
+
+  PermissionForUploadBucketToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ConvertTextToSpeechFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::${UploadS3BucketName}"
+
+  UploadS3Bucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - PermissionForUploadBucketToInvokeLambda
+    Properties:
+      BucketName: !Ref UploadS3BucketName
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - PUT
+            AllowedOrigins:
+              - "*"
+            Id: Rule1
+            MaxAge: 3600
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: "s3:ObjectCreated:Put"
+            Function: !GetAtt ConvertTextToSpeechFunction.Arn
+    
+  RoleForPresignedUrlFunction:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - "sts:AssumeRole"
+      Policies:
+      - PolicyName: PresignedUrlLambdaPolicy
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action: ["ses:CreateEmailIdentity", "ses:GetEmailIdentity"]
+            Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*"
+          - Effect: Allow
+            Action: ["s3:PutObject", "s3:PutObjectTagging"]
+            Resource: !Sub "arn:aws:s3:::${UploadS3BucketName}/*"
+          - Effect: Allow
+            Action: "logs:CreateLogGroup"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+          - Effect: Allow
+            Action: ["logs:CreateLogStream", "logs:PutLogEvents"]
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+          - Effect: Allow
+            Action: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+            Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Logs"
+
+  GetPresignedUrlForS3Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt RoleForPresignedUrlFunction.Arn
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref UploadS3BucketName
+      Code:
+        ZipFile: |
+          const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+          const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+          const {
+              SESv2Client,
+              CreateEmailIdentityCommand,
+              GetEmailIdentityCommand,
+          } = require("@aws-sdk/client-sesv2");
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const { 
+              DynamoDBDocumentClient, 
+              GetCommand, 
+              UpdateCommand 
+          } = require("@aws-sdk/lib-dynamodb");
+
+          exports.handler = async function(event) {
+
+              const body = JSON.parse(event.body);
+              const fileName = body.fileName;
+              const email = body.email;
+
+              const dynamoClient = new DynamoDBClient();
+              const docClient = DynamoDBDocumentClient.from(dynamoClient);
+              
+              const dynamoParams = {
+                  TableName: "Logs",
+                  Key: {
+                      email: email
+                  }
+              };
+              
+              let userRecord;
+              try {
+                  const dynamoResponse = await docClient.send(new GetCommand(dynamoParams));
+                  userRecord = dynamoResponse.Item;
+                  
+                  if (userRecord && userRecord.count >= 50) {
+                      return {
+                      statusCode: 200,
+                      body: JSON.stringify({
+                          message: "Usage limit exceeded. Maximum of 50 uploads allowed.",
+                          preSignedURL: null
+                      }),
+                      headers: {
+                          "Access-Control-Allow-Headers": "Content-Type",
+                          "Access-Control-Allow-Origin": "*",
+                          "Access-Control-Allow-Methods": "OPTIONS,POST",
+                      },
+                      };
+                  }
+              } catch (error) {
+                  console.error("Error checking DynamoDB:", error);
+              }
+
+              const sesClient = new SESv2Client();
+              const identityParams = { EmailIdentity: email };
+              const getEmailIdentityCommand = new GetEmailIdentityCommand(identityParams);
+              let emailIdentityResponse;
+
+              try {
+                  emailIdentityResponse = await sesClient.send(getEmailIdentityCommand);
+              } catch (error) {
+
+                  // If the email identity doesn"t exist, create it and send verification email
+                  if (error.name === "NotFoundException") {
+                      const createEmailIdentityParams = { EmailIdentity: email };
+                      const createEmailIdentityCommand = new CreateEmailIdentityCommand(
+                          createEmailIdentityParams
+                      );
+                      await sesClient.send(createEmailIdentityCommand);
+
+                      return {
+                          statusCode: 200,
+                          body: JSON.stringify({
+                              preSignedURL: null,
+                              isEmailVerified: false,
+                          }),
+                          headers: {
+                              "Access-Control-Allow-Headers": "Content-Type",
+                              "Access-Control-Allow-Origin": "*",
+                              "Access-Control-Allow-Methods": "OPTIONS,POST",
+                          },
+                      };
+                  } else {
+                      throw error;
+                  }
+              }
+
+              // If email identity is created but not successfully verified, don't send preSignedURL, let user verify first.
+              if (emailIdentityResponse.VerificationStatus !== "SUCCESS") {
+
+                  return {
+                      statusCode: 200,
+                      body: JSON.stringify({
+                          message: "Email is not verified. Please verify the email first.",
+                          preSignedURL: null,
+                          isEmailVerified: false,
+                      }),
+                      headers: {
+                          "Access-Control-Allow-Headers": "Content-Type",
+                          "Access-Control-Allow-Origin": "*",
+                          "Access-Control-Allow-Methods": "OPTIONS,POST",
+                      },
+                  };
+              }
+
+              console.log("Email", email, "is already verified.");
+
+              // Create a Pre-signed URL for the S3 Object with given file name and email as a tag
+              const s3Client = new S3Client();
+              const s3Command = new PutObjectCommand({
+                  Bucket: process.env.S3_BUCKET_NAME,
+                  Key: fileName,
+                  Tagging: `email=${email}`,
+              });
+              const s3Response = await getSignedUrl(s3Client, s3Command, {
+                  expiresIn: 3600,
+                  unhoistableHeaders: new Set(["x-amz-tagging"]),
+              });
+              console.log("S3 Response", s3Response);
+
+              const updateParams = {
+                  TableName: "Logs",
+                  Key: {
+                      email: email
+                  },
+                  UpdateExpression: "SET #count = if_not_exists(#count, :start) + :increment",
+                  ExpressionAttributeNames: {
+                      "#count": "count"
+                  },
+                  ExpressionAttributeValues: {
+                      ":increment": 1,
+                      ":start": 0
+                  },
+                  ReturnValues: "UPDATED_NEW"
+              };
+              
+              try {
+                  await docClient.send(new UpdateCommand(updateParams));
+                  console.log("DynamoDB record updated for", email);
+              } catch (error) {
+                  console.error("Error updating DynamoDB:", error);
+              }
+
+              return {
+                  statusCode: 200,
+                  body: JSON.stringify({
+                      message: "Pre-signed URL generated successfully.",
+                      preSignedURL: s3Response,
+                      isEmailVerified: true,
+                  }),
+                  headers: {
+                      "Access-Control-Allow-Headers": "Content-Type",
+                      "Access-Control-Allow-Origin": "*",
+                      "Access-Control-Allow-Methods": "OPTIONS,POST",
+                  },
+              };
+          };
+      Description: "Generates a pre-signed URL for an S3 bucket to store text files."
+
+  TextToSpeechFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: lambda.amazonaws.com
+      Policies:
+        - PolicyName: ConvertTextToSpeechPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ["polly:StartSpeechSynthesisTask"]
+                Resource: "*"
+              - Effect: Allow
+                Action: ["s3:PutObject", "s3:PutObjectTagging"]
+                Resource: !Sub "arn:aws:s3:::${OutputS3BucketName}/*" 
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:GetObjectTagging"]
+                Resource: !Sub "arn:aws:s3:::${UploadS3BucketName}/*" 
+              - Effect: Allow
+                Action: "logs:CreateLogGroup"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Effect: Allow
+                Action: ["logs:CreateLogStream", "logs:PutLogEvents"]
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+  
+  ConvertTextToSpeechFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt TextToSpeechFunctionRole.Arn
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref OutputS3Bucket 
+      Code:
+        ZipFile: |
+          const { S3Client, GetObjectTaggingCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+          const { PollyClient, StartSpeechSynthesisTaskCommand } = require("@aws-sdk/client-polly");
+
+          // Initialize clients with AWS SDK v3 syntax
+          const pollyClient = new PollyClient();
+          const s3Client = new S3Client();
+
+          // Access the bucket name from the environment variable
+          const outputBucketName = process.env.S3_BUCKET_NAME;
+
+          // Helper function to convert readable stream to buffer
+          async function streamToBuffer(stream) {
+            const chunks = [];
+            for await (const chunk of stream) {
+              chunks.push(chunk);
+            }
+            return Buffer.concat(chunks);
+          }
+
+          exports.handler = async (event) => {
+            try {
+              // Get the S3 URI of the object uploaded in the bucket
+              const s3BucketName = event.Records[0].s3.bucket.name;
+              const s3ObjectKey = decodeURIComponent(event.Records[0].s3.object.key.replace(/\+/g, ' '));
+              const s3InputObjectUri = `s3://${s3BucketName}/${s3ObjectKey}`;
+              console.log("Input: ", s3InputObjectUri);
+
+              // Retrieve email tag from the S3 object
+              const s3TagInput = {
+                Bucket: s3BucketName,
+                Key: s3ObjectKey,
+              };
+              
+              const s3TagResponse = await s3Client.send(
+                new GetObjectTaggingCommand(s3TagInput)
+              );
+              
+              const emailTag = s3TagResponse.TagSet.find((tag) => tag.Key === "email");
+              if (!emailTag) {
+                console.warn("No email tag found on the object");
+              }
+
+              // Get the text content from the S3 object
+              const getObjectParams = {
+                Bucket: s3BucketName,
+                Key: s3ObjectKey,
+              };
+              
+              const { Body } = await s3Client.send(
+                new GetObjectCommand(getObjectParams)
+              );
+              
+              // Convert stream to text
+              const streamToString = await streamToBuffer(Body);
+              const text = streamToString.toString('utf-8');
+
+              const fileName = `${emailTag.Value}$`;
+
+              // Set up Polly params
+              const pollyParams = {
+                Text: text,
+                OutputFormat: 'mp3',
+                VoiceId: 'Joanna',
+                OutputS3BucketName: outputBucketName,
+                OutputS3KeyPrefix: fileName,
+              };
+
+              // Process Polly asynchronously
+              const pollyResponse = await pollyClient.send(
+                new StartSpeechSynthesisTaskCommand(pollyParams)
+              );
+
+              return {
+                statusCode: 200,
+                body: JSON.stringify({
+                  message: 'Speech synthesis started. Audio file will be emailed to you shortly.',
+                  audioFile: fileName
+                })
+              };
+            } catch (error) {
+              console.error('Error in Lambda function:', error);
+              throw error;
+            }
+          };
+      Description: "Converts text to speech and stores the output in the output bucket."
+
+  SenderEmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref SenderEmail
+
+  SendEmailRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: lambda.amazonaws.com
+      Policies:
+        - PolicyName: SendEmailPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ["ses:SendEmail", "ses:SendRawEmail"]
+                Resource: "*"
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:GetObjectTagging"]
+                Resource: !Sub "arn:aws:s3:::${OutputS3BucketName}/*"
+              - Effect: Allow
+                Action: "logs:CreateLogGroup"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Effect: Allow
+                Action: ["logs:CreateLogStream", "logs:PutLogEvents"]
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+
+  SendEmailFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt SendEmailRole.Arn
+      Environment:
+        Variables:
+          SENDER_EMAIL: !Ref SenderEmail
+      Code:
+        ZipFile: |
+          const { S3Client, GetObjectTaggingCommand } = require("@aws-sdk/client-s3");
+          const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
+
+          exports.handler = async (event) => {
+            const s3BucketName = event["Records"][0]["s3"]["bucket"]["name"];
+            const s3ObjectKey = event["Records"][0]["s3"]["object"]["key"];
+            const region = event["Records"][0]["awsRegion"];
+            const audioUrl = `https://${s3BucketName}.s3.${region}.amazonaws.com/${s3ObjectKey}`;
+
+            function extractEmailFromFileName(fileName) {
+              const regex = /(.+)\$([\.a-zA-Z0-9\-]+)\.mp3/;
+              const match = fileName.match(regex);
+              if (match) {
+                return match[1]; 
+              } else {
+                throw new Error(fileName);
+              }
+            }
+
+            const email = extractEmailFromFileName(decodeURIComponent(s3ObjectKey));
+            const subject = "Your Audiobook is Ready!";
+            const bodyText = `Hello,\n\nYour requested audio file is ready. You can download it from the following link:\n\n${audioUrl}\n\nBest regards,\nYour Service Team`;
+            
+            const params = {
+              Source: process.env.SENDER_EMAIL,
+              Destination: {
+                ToAddresses: [email]
+              },
+              Message: {
+                Subject: {
+                  Data: subject
+                },
+                Body: {
+                  Text: {
+                    Data: bodyText
+                  }
+                }
+              }
+            };
+            
+            const sesClient = new SESClient();
+            try {
+              const data = await sesClient.send(new SendEmailCommand(params));
+              console.log('Email sent successfully:', data);
+              return {
+                statusCode: 200,
+                body: JSON.stringify({
+                  message: 'Email sent successfully',
+                  data: data
+                })
+              };
+            } catch (error) {
+              console.error('Error sending email:', error);
+              return {
+                statusCode: 500,
+                body: JSON.stringify({
+                  message: 'Failed to send email',
+                  error: error.message
+                })
+              };
+            }
+          };
+      Description: "Sends an email to the recipient with the link to the audio file."
+
+  OutputS3Bucket:
+    Type: "AWS::S3::Bucket"
+    DependsOn:
+    - "PermissionForS3ToInvokeEmailLambda"
+    Properties:
+      BucketName: !Ref OutputS3BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: false
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+        - AllowedHeaders:
+          - "*"
+          AllowedMethods:
+          - PUT
+          AllowedOrigins:
+          - "*"
+          Id: Rule2
+          MaxAge: 3600
+      NotificationConfiguration:
+        LambdaConfigurations:
+        - Event: 's3:ObjectCreated:Put'
+          Function: !GetAtt SendEmailFunction.Arn
+
+  OutputS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref OutputS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowPollyWrite
+            Effect: Allow
+            Principal: "*" 
+            Condition:
+              StringEquals:
+                aws:SourceService: "polly.amazonaws.com"
+            Action: "s3:PutObject"
+            Resource: !Sub "arn:aws:s3:::${OutputS3BucketName}/*"
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${OutputS3BucketName}/*'
+
+  PermissionForS3ToInvokeEmailLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SendEmailFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "s3.amazonaws.com"
+      SourceArn: !Sub "arn:aws:s3:::${OutputS3BucketName}"
+
+  LogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "Logs"
+      AttributeDefinitions:
+        - AttributeName: "email" 
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "email"
+          KeyType: "HASH"  
+      BillingMode: PAY_PER_REQUEST
+
+  ElasticBeanstalkApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      Description: "text-to-speech application"
+      ApplicationName: "TextToSpeechConverter"
+
+  ElasticBeanStalkApplicationVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    Properties:
+      ApplicationName: !Ref ElasticBeanstalkApplication
+      Description: "Version 1.0"
+      SourceBundle:
+        S3Bucket: !Ref FrontendSourceCodeBucket
+        S3Key: !Ref FrontendSourceCode
+
+  ElasticBeanstalkEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref ElasticBeanstalkApplication
+      Description: "Elastic beanstalk environment running a Dockerized react application."
+      EnvironmentName: prod
+      CNAMEPrefix: "TextToSpeechConverter"
+      SolutionStackName: "64bit Amazon Linux 2023 v4.5.0 running Docker"
+      VersionLabel: !Ref ElasticBeanStalkApplicationVersion
+      OptionSettings:
+      - Namespace: 'aws:elasticbeanstalk:environment'
+        OptionName: EnvironmentType
+        Value: LoadBalanced
+      - Namespace: 'aws:autoscaling:launchConfiguration'
+        OptionName: IamInstanceProfile
+        Value: !Ref EBInstanceProfile
+      - Namespace: 'aws:elasticbeanstalk:environment'
+        OptionName: ServiceRole
+        Value: !Ref EBServiceRole
+      - Namespace: 'aws:ec2:instances'
+        OptionName: InstanceTypes
+        Value: t2.micro
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: REACT_APP_API_GATEWAY_URL
+        Value: !Sub "https://${GatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Prod}/upload"
+
+  EBServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - elasticbeanstalk.amazonaws.com
+          Action:
+          - "sts:AssumeRole"
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth"
+      - "arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy"
+
+  EBInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - !Ref EBInstanceProfileRole
+
+  EBInstanceProfileRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - "sts:AssumeRole"
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier"
+
+Outputs:
+
+  FrontendURL:
+    Description: URL for the frontend application
+    Value: !Sub "http://TextToSpeechConverter.${AWS::Region}.elasticbeanstalk.com"
